@@ -1,0 +1,11 @@
+{
+  "gateway": {
+    "port": 3000,
+    "adminKey": "admin-secret-key"
+  },
+  "defaults": {
+    "rateLimit": { "requestsPerSecond": 100, "burst": 200 },
+    "circuitBreaker": { "threshold": 5, "resetTimeoutMs": 30000 },
+    "retry": { "maxRetries": 3, "backoffMs": 100 }
+  }
+}
