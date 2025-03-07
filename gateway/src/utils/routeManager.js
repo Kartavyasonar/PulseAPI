@@ -1,32 +1,19 @@
-// Route Manager — loads from DB, supports hot reload via REST API
-// Routes are cached in memory and refreshed on change
+// Route Manager — in-memory route table loaded from config
+// will add DB persistence + hot reload later
 
 class RouteManager {
-  constructor(db) {
-    this.db = db;
+  constructor() {
     this.routes = new Map();
-    this.loaded = false;
   }
 
-  async load() {
-    const result = await this.db.query(
-      'SELECT id, path_prefix, upstreams, plugins FROM routes ORDER BY LENGTH(path_prefix) DESC'
-    );
+  load(routesArray) {
     this.routes.clear();
-    for (const row of result.rows) {
-      this.routes.set(row.id, {
-        id: row.id,
-        pathPrefix: row.path_prefix,
-        upstreams: row.upstreams,
-        plugins: row.plugins,
-      });
+    for (const r of routesArray) {
+      this.routes.set(r.id, r);
     }
-    this.loaded = true;
-    console.log(`[RouteManager] Loaded ${this.routes.size} routes`);
-    return this.routes;
+    console.log(`[RouteManager] loaded ${this.routes.size} routes`);
   }
 
-  // Match incoming path to a route (longest prefix wins)
   match(path) {
     let best = null;
     let bestLen = 0;
@@ -37,24 +24,6 @@ class RouteManager {
       }
     }
     return best;
-  }
-
-  async create(data, db) {
-    const { id, pathPrefix, upstreams, plugins } = data;
-    await db.query(
-      `INSERT INTO routes (id, path_prefix, upstreams, plugins) 
-       VALUES ($1, $2, $3, $4) 
-       ON CONFLICT (id) DO UPDATE SET path_prefix=$2, upstreams=$3, plugins=$4, updated_at=NOW()`,
-      [id, pathPrefix, JSON.stringify(upstreams), JSON.stringify(plugins)]
-    );
-    await this.load(); // Hot reload
-    return this.routes.get(id);
-  }
-
-  async delete(id, db) {
-    await db.query('DELETE FROM routes WHERE id=$1', [id]);
-    this.routes.delete(id);
-    return true;
   }
 
   list() {
