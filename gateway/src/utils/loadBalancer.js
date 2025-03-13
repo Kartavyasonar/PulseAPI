@@ -1,39 +1,30 @@
-// Round-Robin Load Balancer with circuit breaker awareness
-// Skips OPEN circuit upstreams, falls back to any available
-
-const { STATES } = require('../plugins/circuitBreaker');
+// Round-Robin Load Balancer
+// simple, stateless (counter in memory is fine — slight imbalance on restart is ok)
+// circuit-breaker-aware: skips OPEN upstreams
 
 class LoadBalancer {
   constructor() {
-    this.counters = new Map(); // routeId -> current index
+    this.counters = new Map();
   }
 
   async selectUpstream(routeId, upstreams, circuitBreaker, cbConfig) {
     if (!upstreams || upstreams.length === 0) return null;
 
-    // Check circuit breaker states for all upstreams
-    const states = circuitBreaker
-      ? await circuitBreaker.getAllStates(upstreams)
-      : {};
-
-    // Filter to available upstreams (CLOSED or HALF_OPEN)
-    const available = upstreams.filter(
-      (u) => states[u.url] !== STATES.OPEN
-    );
-
-    if (available.length === 0) {
-      return null; // All circuits open
+    // get CB states for all upstreams, skip OPEN ones
+    let available = upstreams;
+    if (circuitBreaker) {
+      const states = await circuitBreaker.getAllStates(upstreams);
+      available = upstreams.filter(u => states[u.url] !== 'open');
     }
 
-    // Round-robin across available upstreams
-    const counter = this.counters.get(routeId) || 0;
-    const selected = available[counter % available.length];
-    this.counters.set(routeId, counter + 1);
+    if (available.length === 0) return null;
 
-    return { upstream: selected, state: states[selected.url] || STATES.CLOSED };
+    const idx = (this.counters.get(routeId) || 0) % available.length;
+    this.counters.set(routeId, idx + 1);
+
+    return { upstream: available[idx] };
   }
 }
 
 const balancer = new LoadBalancer();
-
 module.exports = { LoadBalancer, balancer };
