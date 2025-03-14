@@ -4,21 +4,37 @@ services:
     build: ./gateway
     ports: ["3000:3000"]
     environment:
-      - NODE_ENV=development
-    depends_on: [upstream1, upstream2]
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+      upstream1:
+        condition: service_started
+      upstream2:
+        condition: service_started
+      upstream3:
+        condition: service_started
 
   upstream1:
     build: ./upstream-mock
-    environment:
-      - PORT=4001
-      - SERVICE_NAME=upstream-1
-      - FAIL_RATE=0.05
+    environment: [PORT=4001, SERVICE_NAME=upstream-1, FAIL_RATE=0.05]
     ports: ["4001:4001"]
 
   upstream2:
     build: ./upstream-mock
-    environment:
-      - PORT=4002
-      - SERVICE_NAME=upstream-2
-      - FAIL_RATE=0.02
+    environment: [PORT=4002, SERVICE_NAME=upstream-2, FAIL_RATE=0.02]
     ports: ["4002:4002"]
+
+  upstream3:
+    build: ./upstream-mock
+    environment: [PORT=4003, SERVICE_NAME=upstream-3, FAIL_RATE=0.0]
+    ports: ["4003:4003"]
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
