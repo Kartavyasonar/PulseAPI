@@ -1,12 +1,3 @@
-// Circuit Breaker — first pass
-// state machine: CLOSED -> OPEN -> HALF_OPEN -> CLOSED
-//
-// CLOSED:    normal operation, count failures
-// OPEN:      reject all requests immediately, return 503
-// HALF_OPEN: allow one probe request through, if it succeeds -> CLOSED
-//
-// storing state in Redis so all gateway instances share it
-
 const STATES = { CLOSED: 'closed', OPEN: 'open', HALF_OPEN: 'half_open' };
 
 class CircuitBreaker {
@@ -23,7 +14,6 @@ class CircuitBreaker {
     const data = await this.redis.hgetall(key);
     if (!data || !data.state) return { state: STATES.CLOSED, failures: 0 };
 
-    // check if OPEN long enough to try HALF_OPEN
     if (data.state === STATES.OPEN) {
       const elapsed = Date.now() - parseInt(data.opened_at || 0);
       if (elapsed > config.resetTimeoutMs) {
@@ -32,7 +22,11 @@ class CircuitBreaker {
       }
     }
 
-    return { state: data.state, failures: parseInt(data.failures || 0) };
+    return {
+      state: data.state,
+      failures: parseInt(data.failures || 0),
+      openedAt: parseInt(data.opened_at || 0),
+    };
   }
 
   async recordSuccess(url) {
@@ -52,13 +46,32 @@ class CircuitBreaker {
   }
 
   async getAllStates(upstreams) {
+    if (!upstreams.length) return {};
+    // pipeline all hgetall calls instead of sequential awaits
+    const pipeline = this.redis.pipeline();
+    for (const u of upstreams) pipeline.hgetall(this._key(u.url));
+    const results = await pipeline.exec();
+
     const states = {};
-    for (const u of upstreams) {
-      const d = await this.redis.hgetall(this._key(u.url));
+    upstreams.forEach((u, i) => {
+      const d = results[i][1];
       states[u.url] = d ? (d.state || STATES.CLOSED) : STATES.CLOSED;
-    }
+    });
     return states;
   }
 }
 
-module.exports = { CircuitBreaker, STATES };
+function circuitBreakerPlugin(redis) {
+  const breaker = new CircuitBreaker(redis);
+  return {
+    breaker,
+    middleware: async (req, res, next, config) => {
+      if (!config || !config.enabled) return next();
+      req.circuitBreaker = breaker;
+      req.circuitBreakerConfig = config;
+      next();
+    },
+  };
+}
+
+module.exports = { circuitBreakerPlugin, CircuitBreaker, STATES };
