@@ -3,33 +3,22 @@ const { WebSocketServer } = require('ws');
 class WsServer {
   constructor() {
     this.clients = new Set();
-    this.wss = null;
   }
 
   attach(server) {
-    this.wss = new WebSocketServer({ server, path: '/ws' });
-
-    this.wss.on('connection', (ws, req) => {
+    const wss = new WebSocketServer({ server, path: '/ws' });
+    wss.on('connection', ws => {
       this.clients.add(ws);
-      console.log(`[WS] Client connected. Total: ${this.clients.size}`);
-
-      ws.on('close', () => {
-        this.clients.delete(ws);
-        console.log(`[WS] Client disconnected. Total: ${this.clients.size}`);
-      });
-
+      ws.on('close', () => this.clients.delete(ws));
       ws.on('error', () => this.clients.delete(ws));
     });
+    console.log('[WS] server attached at /ws');
   }
 
   broadcast(data) {
     const msg = JSON.stringify(data);
     for (const client of this.clients) {
-      if (client.readyState === 1) { // OPEN
-        client.send(msg, (err) => {
-          if (err) this.clients.delete(client);
-        });
-      }
+      if (client.readyState === 1) client.send(msg, err => { if (err) this.clients.delete(client); });
     }
   }
 
