@@ -1,54 +1,128 @@
 require('dotenv').config();
 const express = require('express');
-const http = require('http');
-const { RouteManager } = require('./utils/routeManager');
+const http    = require('http');
+const { Pool } = require('pg');
+const Redis   = require('ioredis');
 
-const app = express();
-app.use(express.json());
+const { RouteManager }              = require('./utils/routeManager');
+const { RequestLogger, loggerMiddleware } = require('./utils/logger');
+const { WsServer }                  = require('./utils/wsServer');
+const { rateLimitPlugin }           = require('./plugins/rateLimit');
+const { circuitBreakerPlugin }      = require('./plugins/circuitBreaker');
+const { authPlugin }                = require('./plugins/auth');
+const { balancer }                  = require('./utils/loadBalancer');
+const { proxyRequest }              = require('./utils/proxy');
+const { adminRouter }               = require('./routes/admin');
 
-const routeManager = new RouteManager();
+async function start() {
+  const db = new Pool({
+    connectionString: process.env.DATABASE_URL || 'postgresql://pulse:pulse@localhost:5432/pulseapi',
+  });
+  const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', { lazyConnect: true });
+  await redis.connect().catch(console.error);
 
-// load from config for now, will move to DB
-const config = require('../config.json');
-routeManager.load(config.routes || []);
+  const app    = express();
+  const server = http.createServer(app);
+  const ws     = new WsServer();
+  ws.attach(server);
 
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', routes: routeManager.list().length });
-});
+  const routeManager = new RouteManager(db);
+  await routeManager.load();
 
-app.get('/admin/routes', (req, res) => {
-  res.json({ routes: routeManager.list() });
-});
+  const logger = new RequestLogger(db, ws);
 
-app.all('*', (req, res) => {
-  const route = routeManager.match(req.path);
-  if (!route) return res.status(404).json({ error: 'no route matched', path: req.path });
+  const rateLimit = rateLimitPlugin(redis);
+  const cbPlugin  = circuitBreakerPlugin(redis);
+  const auth      = authPlugin();
 
-  const upstream = Array.isArray(route.upstreams) ? route.upstreams[0] : { url: route.upstream };
-  const targetUrl = new URL(upstream.url);
-
-  const options = {
-    hostname: targetUrl.hostname,
-    port: targetUrl.port || 80,
-    path: req.originalUrl.replace(new RegExp(`^${route.pathPrefix}`), '') || '/',
-    method: req.method,
-    headers: { ...req.headers, host: targetUrl.host },
-    timeout: 8000,
-  };
-
-  const proxyReq = http.request(options, proxyRes => {
-    const chunks = [];
-    proxyRes.on('data', c => chunks.push(c));
-    proxyRes.on('end', () => {
-      res.status(proxyRes.statusCode).send(Buffer.concat(chunks));
-    });
+  app.use(express.json());
+  app.use(loggerMiddleware(logger));
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Api-Key');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    req.clientIp = (req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+    next();
   });
 
-  proxyReq.on('error', err => res.status(502).json({ error: err.message }));
-  proxyReq.on('timeout', () => { proxyReq.destroy(); res.status(504).json({ error: 'gateway timeout' }); });
+  app.use('/admin', adminRouter(db, routeManager, cbPlugin.breaker, ws));
 
-  if (['POST','PUT','PATCH'].includes(req.method)) req.pipe(proxyReq);
-  else proxyReq.end();
-});
+  app.get('/health', async (req, res) => {
+    const [dbOk, redisOk] = await Promise.all([
+      db.query('SELECT 1').then(() => true).catch(() => false),
+      redis.ping().then(() => true).catch(() => false),
+    ]);
+    res.json({ status: dbOk && redisOk ? 'ok' : 'degraded', db: dbOk, redis: redisOk, routes: routeManager.list().length, uptime: process.uptime() });
+  });
 
-app.listen(3000, () => console.log('gateway :3000'));
+  app.all('*', async (req, res) => {
+    const route = routeManager.match(req.path);
+    if (!route) return res.status(404).json({ error: 'no route matched', path: req.path });
+
+    req.routeId    = route.id;
+    req.log.routeId = route.id;
+    const plugins  = route.plugins;
+
+    const runPlugin = (fn, cfg) => new Promise(resolve => fn(req, res, resolve, cfg));
+
+    await runPlugin(rateLimit, plugins.rateLimit);
+    if (res.headersSent) return;
+
+    await runPlugin(auth, plugins.auth);
+    if (res.headersSent) return;
+
+    await runPlugin(cbPlugin.middleware, plugins.circuitBreaker);
+    if (res.headersSent) return;
+
+    const sel = await balancer.selectUpstream(route.id, route.upstreams, req.circuitBreaker, plugins.circuitBreaker);
+    if (!sel) {
+      req.log.status = 503;
+      return res.status(503).json({ error: 'all upstreams unavailable', retryAfter: 30 });
+    }
+
+    req.log.upstream = sel.upstream.url;
+    const result = await proxyRequest(req, res, sel.upstream, route, req.circuitBreaker);
+
+    req.log.retries = result.retries || 0;
+    req.log.status  = result.status;
+
+    if (result.circuitOpen) return res.status(503).json({ error: result.error });
+    if (result.error && !result.body) return res.status(result.status || 502).json({ error: result.error });
+
+    if (result.headers) {
+      Object.entries(result.headers).forEach(([k,v]) => { try { res.setHeader(k,v); } catch {} });
+    }
+    res.setHeader('X-Gateway', 'PulseAPI/1.0');
+    res.setHeader('X-Route-Id', route.id);
+    res.setHeader('X-Retries', result.retries || 0);
+    res.status(result.status || 200).send(result.body);
+  });
+
+  // push stats to dashboard every second
+  setInterval(async () => {
+    try {
+      const r = await db.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '1 second') rps,
+          ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latency_ms)) FILTER (WHERE timestamp > NOW() - INTERVAL '1 minute') p50,
+          ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms)) FILTER (WHERE timestamp > NOW() - INTERVAL '1 minute') p95,
+          ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms)) FILTER (WHERE timestamp > NOW() - INTERVAL '1 minute') p99,
+          COUNT(*) FILTER (WHERE status_code >= 400 AND timestamp > NOW() - INTERVAL '1 minute') errors_1m
+        FROM requests WHERE timestamp > NOW() - INTERVAL '1 minute'
+      `);
+      ws.broadcastStats({ ...r.rows[0], timestamp: Date.now() });
+    } catch {}
+  }, 1000);
+
+  const PORT = process.env.PORT || 3000;
+  server.listen(PORT, () => {
+    console.log(`\n⚡ PulseAPI running on :${PORT}`);
+    console.log(`   admin: http://localhost:${PORT}/admin  (X-Api-Key: ${process.env.ADMIN_KEY || 'admin-secret-key'})`);
+    console.log(`   ws:    ws://localhost:${PORT}/ws\n`);
+  });
+
+  process.on('SIGTERM', async () => { server.close(); await db.end(); redis.disconnect(); });
+}
+
+start().catch(err => { console.error('fatal:', err); process.exit(1); });
