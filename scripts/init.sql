@@ -13,12 +13,10 @@ CREATE TABLE IF NOT EXISTS requests (
   error       TEXT
 );
 
--- index on timestamp for time-range queries (most common analytics query)
-CREATE INDEX idx_requests_timestamp ON requests (timestamp DESC);
--- index for per-client analytics
-CREATE INDEX idx_requests_client_ip ON requests (client_ip, timestamp DESC);
--- index for per-route analytics
-CREATE INDEX idx_requests_route ON requests (route_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_client_ip ON requests (client_ip, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_route     ON requests (route_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_status    ON requests (status_code, timestamp DESC);
 
 CREATE TABLE IF NOT EXISTS routes (
   id          VARCHAR(100) PRIMARY KEY,
@@ -28,3 +26,29 @@ CREATE TABLE IF NOT EXISTS routes (
   created_at  TIMESTAMPTZ DEFAULT NOW(),
   updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS api_keys (
+  key_hash   VARCHAR(64) PRIMARY KEY,
+  name       VARCHAR(100) NOT NULL,
+  rate_limit INTEGER DEFAULT 100,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  active     BOOLEAN DEFAULT TRUE
+);
+
+INSERT INTO routes (id, path_prefix, upstreams, plugins) VALUES
+(
+  'api-service', '/api',
+  '[{"url":"http://upstream1:4001","weight":1},{"url":"http://upstream2:4002","weight":1},{"url":"http://upstream3:4003","weight":1}]',
+  '{"rateLimit":{"enabled":true,"requestsPerSecond":50,"burst":10},"auth":{"enabled":false},"retry":{"enabled":true,"maxRetries":3,"backoffMs":100},"circuitBreaker":{"enabled":true,"threshold":5,"resetTimeoutMs":30000}}'
+),
+(
+  'public-service', '/public',
+  '[{"url":"http://upstream3:4003","weight":1}]',
+  '{"rateLimit":{"enabled":true,"requestsPerSecond":10,"burst":5},"auth":{"enabled":false},"retry":{"enabled":true,"maxRetries":2,"backoffMs":200},"circuitBreaker":{"enabled":true,"threshold":5,"resetTimeoutMs":30000}}'
+),
+(
+  'secure-service', '/secure',
+  '[{"url":"http://upstream1:4001","weight":1}]',
+  '{"rateLimit":{"enabled":true,"requestsPerSecond":20,"burst":5},"auth":{"enabled":true},"retry":{"enabled":true,"maxRetries":3,"backoffMs":100},"circuitBreaker":{"enabled":true,"threshold":5,"resetTimeoutMs":30000}}'
+)
+ON CONFLICT (id) DO NOTHING;
