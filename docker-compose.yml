@@ -1,19 +1,23 @@
 version: '3.9'
+
 services:
   gateway:
     build: ./gateway
-    ports: ["3000:3000"]
+    ports: ["3000:3000", "3001:3001"]
     environment:
+      - NODE_ENV=production
       - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://pulse:pulse@postgres:5432/pulseapi
+      - JWT_SECRET=supersecretjwtkey123
+      - ADMIN_KEY=admin-secret-key
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
-      upstream1:
-        condition: service_started
-      upstream2:
-        condition: service_started
-      upstream3:
-        condition: service_started
+    volumes:
+      - ./gateway/config.json:/app/config.json
+    restart: unless-stopped
 
   upstream1:
     build: ./upstream-mock
@@ -38,3 +42,24 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  postgres:
+    image: postgres:15-alpine
+    environment: [POSTGRES_USER=pulse, POSTGRES_PASSWORD=pulse, POSTGRES_DB=pulseapi]
+    ports: ["5432:5432"]
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulse -d pulseapi"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  dashboard:
+    build: ./dashboard
+    ports: ["5173:80"]
+    depends_on: [gateway]
+
+volumes:
+  pg_data:
