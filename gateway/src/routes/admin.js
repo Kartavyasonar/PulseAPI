@@ -1,5 +1,9 @@
 const { Router } = require('express');
 const { generateTestToken } = require('../plugins/auth');
+const crypto = require('crypto');
+
+// whitelist prevents SQL injection via window param
+const ALLOWED_WINDOWS = ['1 hour', '6 hours', '24 hours', '7 days', '30 days'];
 
 function adminRouter(db, routeManager, circuitBreaker, wsServer) {
   const router = Router();
@@ -7,30 +11,29 @@ function adminRouter(db, routeManager, circuitBreaker, wsServer) {
 
   router.use((req, res, next) => {
     if (req.headers['x-api-key'] !== ADMIN_KEY) {
-      return res.status(403).json({ error: 'admin access required' });
+      return res.status(403).json({ error: 'admin access required', hint: `X-Api-Key: ${ADMIN_KEY}` });
     }
     next();
   });
 
-  router.get('/routes', (req, res) => {
-    res.json({ routes: routeManager.list() });
-  });
+  // ── Routes ──────────────────────────────────────────────────────────────
+
+  router.get('/routes', (req, res) => res.json({ routes: routeManager.list() }));
 
   router.post('/routes', async (req, res) => {
     try {
       const { id, pathPrefix, upstreams, plugins } = req.body;
       if (!id || !pathPrefix || !upstreams) {
-        return res.status(400).json({ error: 'id, pathPrefix, and upstreams required' });
+        return res.status(400).json({ error: 'id, pathPrefix, upstreams required' });
       }
       const defaults = {
-        rateLimit:      { enabled: true,  requestsPerSecond: 10, burst: 20 },
+        rateLimit:      { enabled: true,  requestsPerSecond: 10, burst: 20, algorithm: 'token-bucket' },
         auth:           { enabled: false },
         retry:          { enabled: true,  maxRetries: 3, backoffMs: 100 },
-        circuitBreaker: { enabled: true,  threshold: 5, resetTimeoutMs: 30000 },
+        circuitBreaker: { enabled: true,  threshold: 5,  resetTimeoutMs: 30000 },
       };
       const route = await routeManager.create(
-        { id, pathPrefix, upstreams, plugins: { ...defaults, ...plugins } },
-        db
+        { id, pathPrefix, upstreams, plugins: { ...defaults, ...plugins } }, db
       );
       wsServer.broadcast({ type: 'route_added', data: route });
       res.status(201).json({ route, message: 'created and hot-loaded — no restart required' });
@@ -44,9 +47,12 @@ function adminRouter(db, routeManager, circuitBreaker, wsServer) {
     res.json({ message: `${req.params.id} deleted` });
   });
 
+  // ── Analytics ────────────────────────────────────────────────────────────
+
   router.get('/analytics', async (req, res) => {
+    // SECURITY: whitelist window to prevent SQL injection
+    const safeWindow = ALLOWED_WINDOWS.includes(req.query.window) ? req.query.window : '1 hour';
     try {
-      const w = (req.query.window || '1 hour').replace(/[^a-z0-9 ]/gi, '');
       const [summary, topEndpoints, errorBreakdown, timeseries] = await Promise.all([
         db.query(`
           SELECT COUNT(*) total_requests,
@@ -55,14 +61,14 @@ function adminRouter(db, routeManager, circuitBreaker, wsServer) {
             PERCENTILE_CONT(0.5)  WITHIN GROUP (ORDER BY latency_ms) p50,
             PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms) p95,
             PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms) p99
-          FROM requests WHERE timestamp > NOW() - INTERVAL '${w}'`),
+          FROM requests WHERE timestamp > NOW() - INTERVAL '${safeWindow}'`),
         db.query(`
           SELECT path, COUNT(*) count, ROUND(AVG(latency_ms)) avg_latency
-          FROM requests WHERE timestamp > NOW() - INTERVAL '${w}'
+          FROM requests WHERE timestamp > NOW() - INTERVAL '${safeWindow}'
           GROUP BY path ORDER BY count DESC LIMIT 10`),
         db.query(`
           SELECT status_code, COUNT(*) count
-          FROM requests WHERE timestamp > NOW() - INTERVAL '${w}'
+          FROM requests WHERE timestamp > NOW() - INTERVAL '${safeWindow}'
           GROUP BY status_code ORDER BY count DESC`),
         db.query(`
           SELECT date_trunc('minute', timestamp) minute,
@@ -70,7 +76,7 @@ function adminRouter(db, routeManager, circuitBreaker, wsServer) {
             PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms) p95,
             PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms) p99,
             COUNT(*) total, COUNT(*) FILTER (WHERE status_code >= 400) errors
-          FROM requests WHERE timestamp > NOW() - INTERVAL '${w}'
+          FROM requests WHERE timestamp > NOW() - INTERVAL '${safeWindow}'
           GROUP BY minute ORDER BY minute DESC LIMIT 60`),
       ]);
       res.json({ summary: summary.rows[0], topEndpoints: topEndpoints.rows, errorBreakdown: errorBreakdown.rows, latencyTimeseries: timeseries.rows });
@@ -79,10 +85,11 @@ function adminRouter(db, routeManager, circuitBreaker, wsServer) {
     }
   });
 
+  // ── Circuit Breakers ──────────────────────────────────────────────────────
+
   router.get('/circuit-breakers', async (req, res) => {
     const upstreams = routeManager.list().flatMap(r => r.upstreams);
-    const states = await circuitBreaker.getAllStates(upstreams);
-    res.json({ states });
+    res.json({ states: await circuitBreaker.getAllStates(upstreams) });
   });
 
   router.post('/circuit-breakers/reset', async (req, res) => {
@@ -91,6 +98,62 @@ function adminRouter(db, routeManager, circuitBreaker, wsServer) {
     await circuitBreaker.recordSuccess(upstream);
     res.json({ message: `reset: ${upstream}` });
   });
+
+  // ── Tenants ───────────────────────────────────────────────────────────────
+
+  router.get('/tenants', async (req, res) => {
+    const result = await db.query(`
+      SELECT t.id, t.name, t.tier, t.created_at,
+        q.requests_per_second, q.requests_per_minute, q.requests_per_day,
+        COUNT(k.key_hash) AS key_count
+      FROM tenants t
+      JOIN tenant_quota_config q ON q.tenant_id = t.id
+      LEFT JOIN tenant_api_keys k ON k.tenant_id = t.id AND k.is_active = TRUE
+      GROUP BY t.id, t.name, t.tier, t.created_at, q.requests_per_second, q.requests_per_minute, q.requests_per_day
+      ORDER BY t.created_at
+    `);
+    res.json({ tenants: result.rows });
+  });
+
+  router.post('/tenants', async (req, res) => {
+    const { id, name, tier = 'free' } = req.body;
+    if (!id || !name) return res.status(400).json({ error: 'id and name required' });
+    const limits = { free: [10, 500, 50000], pro: [100, 5000, 500000], enterprise: [1000, 50000, 10000000] };
+    const [rps, rpm, rpd] = limits[tier] || limits.free;
+    await db.query('INSERT INTO tenants(id, name, tier) VALUES($1,$2,$3)', [id, name, tier]);
+    await db.query('INSERT INTO tenant_quota_config(tenant_id,requests_per_second,requests_per_minute,requests_per_day) VALUES($1,$2,$3,$4)', [id, rps, rpm, rpd]);
+    res.status(201).json({ tenant: { id, name, tier, requests_per_second: rps } });
+  });
+
+  router.get('/tenants/:id/usage', async (req, res) => {
+    const { id } = req.params;
+    const safeWindow = '24 hours';
+    const result = await db.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '1 hour') last_hour,
+        COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '24 hours') last_day,
+        COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '30 days') last_month,
+        ROUND(AVG(latency_ms)) avg_latency,
+        COUNT(*) FILTER (WHERE status_code >= 400 AND timestamp > NOW() - INTERVAL '24 hours') errors_day
+      FROM requests WHERE tenant_id = $1
+    `, [id]);
+    res.json({ tenantId: id, usage: result.rows[0] });
+  });
+
+  router.post('/tenants/:id/keys', async (req, res) => {
+    const { id } = req.params;
+    const { name = 'api key' } = req.body;
+    const rawKey  = `pk_${id}_${crypto.randomBytes(24).toString('hex')}`;
+    const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
+    await db.query(
+      'INSERT INTO tenant_api_keys(key_hash, tenant_id, name) VALUES($1,$2,$3)',
+      [keyHash, id, name]
+    );
+    // raw key returned ONCE — never stored
+    res.status(201).json({ key: rawKey, hint: 'Store this — it will not be shown again' });
+  });
+
+  // ── Auth ──────────────────────────────────────────────────────────────────
 
   router.post('/token', (req, res) => {
     const token = generateTestToken(req.body || {});
