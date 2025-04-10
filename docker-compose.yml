@@ -3,13 +3,14 @@ version: '3.9'
 services:
   gateway:
     build: ./gateway
-    ports: ["3000:3000", "3001:3001"]
+    ports: ["3000:3000"]
     environment:
       - NODE_ENV=production
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://pulse:pulse@postgres:5432/pulseapi
       - JWT_SECRET=supersecretjwtkey123
       - ADMIN_KEY=admin-secret-key
+      - JAEGER_ENDPOINT=http://jaeger:14268/api/traces
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,6 +61,14 @@ services:
     build: ./dashboard
     ports: ["5173:80"]
     depends_on: [gateway]
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.52
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "14268:14268"   # HTTP collector
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
 
 volumes:
   pg_data:
