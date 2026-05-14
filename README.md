@@ -185,15 +185,3 @@ SELECT PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms)
 FROM requests
 WHERE timestamp > NOW() - INTERVAL '1 hour';
 ```
-
-## SDE Interview Q&A
-
-**"How does rate limiting work?"** — Token bucket: each client has a bucket of N tokens. Each request consumes 1 token. Tokens refill at `requestsPerSecond` rate. Stored atomically in Redis with Lua scripts. When bucket empty → 429 with Retry-After header.
-
-**"What is a circuit breaker?"** — Three-state machine. CLOSED (normal). After 5 consecutive 5xx → OPEN (instant 503). After 30s → HALF_OPEN (let one request through). If it succeeds → back to CLOSED.
-
-**"How does load balancing work?"** — Round-robin across configured upstream URLs, skipping any with open circuits. Counter stored in memory per route.
-
-**"Why Redis for rate limiting, not PostgreSQL?"** — Redis is O(1) for counter ops, supports Lua for atomicity, sub-millisecond latency. PostgreSQL would add 5-20ms per request.
-
-**"How do you handle high concurrency?"** — Node.js event loop handles I/O concurrently without threads. Redis Lua scripts handle atomic operations. Async DB writes buffered every 500ms to avoid blocking.
