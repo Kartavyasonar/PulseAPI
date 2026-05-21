@@ -1,7 +1,7 @@
 # ⚡ PulseAPI — Production-Grade API Gateway
 
-[![CI](https://github.com/YOUR_USERNAME/pulseapi/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USERNAME/pulseapi/actions)
-[![codecov](https://codecov.io/gh/YOUR_USERNAME/pulseapi/branch/main/graph/badge.svg)](https://codecov.io/gh/YOUR_USERNAME/pulseapi)
+[![CI](https://github.com/Kartavyasonar/pulseapi/actions/workflows/ci.yml/badge.svg)](https://github.com/Kartavyasonar/pulseapi/actions)
+[![codecov](https://codecov.io/gh/Kartavyasonar/pulseapi/branch/main/graph/badge.svg)](https://codecov.io/gh/Kartavyasonar/pulseapi)
 
 **Live demo:** http://YOUR_ORACLE_IP:3000/health — deployed on Oracle Cloud (always-free A1 instance)
 
