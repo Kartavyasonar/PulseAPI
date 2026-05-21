@@ -1,6 +1,20 @@
 // tracing MUST be first — OTel patches http/express on require
 require('./tracing');
 
+// metrics second — defines the prom-client registry before any request arrives
+const {
+  register,
+  httpRequestsTotal,
+  httpRequestDurationMs,
+  upstreamErrorsTotal,
+  rateLimitRejectionsTotal,
+  circuitBreakerState,
+  proxyRetriesTotal,
+  wsConnectionsActive,
+  routesActive,
+  CB_STATE_VALUE,
+} = require('./metrics');
+
 require('dotenv').config();
 const express = require('express');
 const http    = require('http');
@@ -44,11 +58,20 @@ async function start() {
   app.use(express.json());
   app.use(loggerMiddleware(logger));
   app.use((req, res, next) => {
+    req._startMs = Date.now(); // used by Prometheus histogram
     res.setHeader('Access-Control-Allow-Origin',  '*');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Api-Key');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     req.clientIp = (req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+    // Record non-proxied requests (admin, health, 404s) in Prometheus
+    res.on('finish', () => {
+      if (req._metricsRecorded) return; // proxied requests record themselves
+      const routeLabel = req.path.startsWith('/admin') ? '__admin__' : '__gateway__';
+      const statusLabel = String(res.statusCode);
+      httpRequestsTotal.labels(req.method, routeLabel, statusLabel).inc();
+      httpRequestDurationMs.labels(req.method, routeLabel, statusLabel).observe(Date.now() - req._startMs);
+    });
     next();
   });
 
@@ -62,6 +85,26 @@ async function start() {
     res.json({ status: dbOk && redisOk ? 'ok' : 'degraded', db: dbOk, redis: redisOk, routes: routeManager.list().length, uptime: process.uptime() });
   });
 
+  // Prometheus scrape endpoint — no auth so Prometheus can reach it without config
+  // In production you'd put this behind a firewall or internal network only
+  app.get('/metrics', async (req, res) => {
+    // Refresh slow-changing gauges on each scrape (cheap — in-memory reads)
+    routesActive.set(routeManager.list().length);
+    wsConnectionsActive.set(ws.clients?.size ?? 0);
+
+    // Snapshot circuit breaker states for all known upstreams
+    const allUpstreams = routeManager.list().flatMap(r => r.upstreams);
+    if (allUpstreams.length) {
+      const states = await cbPlugin.breaker.getAllStates(allUpstreams).catch(() => ({}));
+      for (const [url, state] of Object.entries(states)) {
+        circuitBreakerState.labels(url).set(CB_STATE_VALUE[state] ?? 0);
+      }
+    }
+
+    res.set('Content-Type', register.contentType);
+    res.end(await register.metrics());
+  });
+
   app.all('*', async (req, res) => {
     const route = routeManager.match(req.path);
     if (!route) return res.status(404).json({ error: 'no route matched', path: req.path, hint: 'POST /admin/routes to add a route' });
@@ -73,7 +116,10 @@ async function start() {
     const runPlugin = (fn, cfg) => new Promise(resolve => fn(req, res, resolve, cfg));
 
     await runPlugin(rateLimit, plugins.rateLimit);
-    if (res.headersSent) return;
+    if (res.headersSent) {
+      rateLimitRejectionsTotal.labels(route.id, plugins.rateLimit?.algorithm || 'token-bucket').inc();
+      return;
+    }
 
     await runPlugin(auth, plugins.auth);
     if (res.headersSent) return;
@@ -85,6 +131,7 @@ async function start() {
     if (!sel) {
       req.log.status = 503;
       ws.broadcast({ type: 'circuit_open', routeId: route.id });
+      upstreamErrorsTotal.labels(req.log.upstream || 'unknown', route.id, 'circuit_open').inc();
       return res.status(503).json({ error: 'all upstreams unavailable', retryAfter: 30 });
     }
 
@@ -92,6 +139,19 @@ async function start() {
     const result = await proxyRequest(req, res, sel.upstream, route, req.circuitBreaker);
     req.log.retries = result.retries || 0;
     req.log.status  = result.status;
+
+    // ── Prometheus observations ───────────────────────────────────────────
+    const routeLabel  = route.id;
+    const statusLabel = String(result.status || 502);
+    req._metricsRecorded = true; // prevent finish hook double-count
+    httpRequestsTotal.labels(req.method, routeLabel, statusLabel).inc();
+    httpRequestDurationMs.labels(req.method, routeLabel, statusLabel).observe(Date.now() - req._startMs);
+    if (result.retries > 0) proxyRetriesTotal.labels(routeLabel, sel.upstream.url).inc(result.retries);
+    if (result.status >= 500 || result.error) {
+      const errType = result.circuitOpen ? 'circuit_open' : result.status === 504 ? 'timeout' : '5xx';
+      upstreamErrorsTotal.labels(sel.upstream.url, routeLabel, errType).inc();
+    }
+    // ─────────────────────────────────────────────────────────────────────
 
     if (result.circuitOpen) return res.status(503).json({ error: result.error });
     if (result.error && !result.body) return res.status(result.status || 502).json({ error: result.error });
@@ -110,9 +170,9 @@ async function start() {
       const r = await db.query(`
         SELECT
           COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '1 second') rps,
-          ROUND(PERCENTILE_CONT(0.5)  WITHIN GROUP (ORDER BY latency_ms)) FILTER (WHERE timestamp > NOW() - INTERVAL '1 minute') p50,
-          ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms)) FILTER (WHERE timestamp > NOW() - INTERVAL '1 minute') p95,
-          ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms)) FILTER (WHERE timestamp > NOW() - INTERVAL '1 minute') p99,
+          ROUND((PERCENTILE_CONT(0.5)  WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE timestamp > NOW() - INTERVAL '1 minute'))::numeric) p50,
+          ROUND((PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE timestamp > NOW() - INTERVAL '1 minute'))::numeric) p95,
+          ROUND((PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE timestamp > NOW() - INTERVAL '1 minute'))::numeric) p99,
           COUNT(*) FILTER (WHERE status_code >= 400 AND timestamp > NOW() - INTERVAL '1 minute') errors_1m
         FROM requests WHERE timestamp > NOW() - INTERVAL '1 minute'`);
       ws.broadcastStats({ ...r.rows[0], timestamp: Date.now() });

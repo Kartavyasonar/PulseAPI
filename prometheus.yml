@@ -1,0 +1,14 @@
+global:
+  scrape_interval: 15s      # how often Prometheus pulls /metrics
+  evaluation_interval: 15s  # how often recording/alerting rules are evaluated
+
+scrape_configs:
+  - job_name: 'pulseapi-gateway'
+    static_configs:
+      - targets: ['gateway:3000']
+    metrics_path: /metrics
+
+  # Scrape Prometheus itself — useful for debugging scrape health
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

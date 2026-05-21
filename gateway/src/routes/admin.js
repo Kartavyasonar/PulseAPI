@@ -71,13 +71,13 @@ function adminRouter(db, routeManager, circuitBreaker, wsServer) {
           FROM requests WHERE timestamp > NOW() - INTERVAL '${safeWindow}'
           GROUP BY status_code ORDER BY count DESC`),
         db.query(`
-          SELECT date_trunc('minute', timestamp) minute,
+          SELECT date_trunc('minute', timestamp) AS bucket,
             PERCENTILE_CONT(0.5)  WITHIN GROUP (ORDER BY latency_ms) p50,
             PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms) p95,
             PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms) p99,
             COUNT(*) total, COUNT(*) FILTER (WHERE status_code >= 400) errors
           FROM requests WHERE timestamp > NOW() - INTERVAL '${safeWindow}'
-          GROUP BY minute ORDER BY minute DESC LIMIT 60`),
+          GROUP BY bucket ORDER BY bucket DESC LIMIT 60`),
       ]);
       res.json({ summary: summary.rows[0], topEndpoints: topEndpoints.rows, errorBreakdown: errorBreakdown.rows, latencyTimeseries: timeseries.rows });
     } catch (err) {

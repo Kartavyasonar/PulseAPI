@@ -182,7 +182,7 @@ export default function App() {
   }, [lastStats]);
 
   const timeseries = analytics?.latencyTimeseries?.slice(0, 30).reverse().map((r) => ({
-    time: new Date(r.minute).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    time: (() => { const d = r.bucket instanceof Date ? r.bucket : new Date(r.bucket); return isNaN(d) ? '—' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); })(),
     p50: Math.round(r.p50 || 0),
     p95: Math.round(r.p95 || 0),
     p99: Math.round(r.p99 || 0),
@@ -466,3 +466,4 @@ export default function App() {
     </div>
   );
 }
+  

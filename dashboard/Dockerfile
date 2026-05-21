@@ -1,7 +1,7 @@
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+RUN npm install
 COPY . .
 ARG VITE_GATEWAY_URL=http://localhost:3000
 ARG VITE_GATEWAY_WS=ws://localhost:3000/ws

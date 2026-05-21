@@ -106,9 +106,9 @@ function rateLimitPlugin(redis, db) {
   return async (req, res, next, config) => {
     if (!config || !config.enabled) return next();
 
-    const { requestsPerSecond = 10, burst = 20, algorithm = 'token-bucket' } = config;
-    let rps   = requestsPerSecond;
-    let burst = burst;
+    const { requestsPerSecond = 10, burst: configBurst = 20, algorithm = 'token-bucket' } = config;
+    let rps        = requestsPerSecond;
+    let burstLimit = configBurst;
     let rlKey;
 
     // try to resolve tenant from API key
@@ -116,8 +116,8 @@ function rateLimitPlugin(redis, db) {
     if (rawKey) {
       const tenant = await resolveTenant(rawKey, db).catch(() => null);
       if (tenant) {
-        rps    = tenant.requests_per_second;
-        burst  = Math.min(rps * 2, 2000);
+        rps        = tenant.requests_per_second;
+        burstLimit = Math.min(rps * 2, 2000);
         rlKey  = `tenant:${tenant.tenant_id}:${req.routeId}`;
         req.tenantId = tenant.tenant_id;
         req.log.tenantId = tenant.tenant_id;
@@ -128,10 +128,9 @@ function rateLimitPlugin(redis, db) {
       rlKey = `ip:${req.clientIp || req.ip}:${req.routeId}`;
     }
 
-    const limiter = algorithm === 'sliding-window' ? slidingWindow : tokenBucket;
-    const result  = algorithm === 'sliding-window'
+    const result = algorithm === 'sliding-window'
       ? await slidingWindow.consume(rlKey, rps, 1000)
-      : await tokenBucket.consume(rlKey, rps, burst);
+      : await tokenBucket.consume(rlKey, rps, burstLimit);
 
     res.setHeader('X-RateLimit-Limit',     rps);
     res.setHeader('X-RateLimit-Remaining', result.remainingTokens);
