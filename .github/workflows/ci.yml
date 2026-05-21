@@ -30,13 +30,20 @@ jobs:
 
       - run: psql postgresql://pulse:pulse@localhost:5432/pulseapi -f scripts/init.sql
 
-      - run: npm test -- --coverage
+      - run: npm test -- --coverage --coverageReporters=text --coverageReporters=lcov
         working-directory: gateway
         env:
           DATABASE_URL: postgresql://pulse:pulse@localhost:5432/pulseapi
           REDIS_URL: redis://localhost:6379
           JWT_SECRET: test-secret
           ADMIN_KEY: test-admin-key
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: gateway/coverage/lcov.info
+          flags: unit
+          fail_ci_if_error: false
 
   build:
     runs-on: ubuntu-latest
@@ -79,6 +86,41 @@ jobs:
 
       - if: failure()
         run: docker compose logs gateway
+
+      - if: always()
+        run: docker compose down -v
+
+  k6-smoke:
+    name: k6 Smoke Test
+    runs-on: ubuntu-latest
+    needs: integration
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install k6
+        run: |
+          sudo gpg --no-default-keyring \
+            --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 \
+            --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] \
+            https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update -qq && sudo apt-get install -y k6
+
+      - name: Start full stack
+        run: |
+          docker compose up -d --build
+          for i in {1..30}; do
+            curl -sf http://localhost:3000/health && echo "gateway ready" && break
+            sleep 2
+          done
+
+      - name: Run k6 smoke test
+        run: k6 run load-tests/smoke.js
+        env:
+          GATEWAY_URL: http://localhost:3000
+          ADMIN_KEY: admin-secret-key
 
       - if: always()
         run: docker compose down -v

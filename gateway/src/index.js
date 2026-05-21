@@ -23,6 +23,7 @@ const Redis   = require('ioredis');
 
 const { RouteManager }                   = require('./utils/routeManager');
 const { RequestLogger, loggerMiddleware }= require('./utils/logger');
+const { kafkaLogger }                    = require('./utils/kafkaLogger');
 const { WsServer }                       = require('./utils/wsServer');
 const { rateLimitPlugin }                = require('./plugins/rateLimit');
 const { circuitBreakerPlugin }           = require('./plugins/circuitBreaker');
@@ -39,6 +40,7 @@ async function start() {
   const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', { lazyConnect: true });
   await redis.connect().catch(console.error);
   await db.query('SELECT 1').catch(console.error);
+  await kafkaLogger.init();
 
   const app    = express();
   const server = http.createServer(app);
@@ -187,7 +189,7 @@ async function start() {
     console.log(`   traces: http://localhost:16686\n`);
   });
 
-  process.on('SIGTERM', async () => { server.close(); await db.end(); redis.disconnect(); });
+  process.on('SIGTERM', async () => { server.close(); await kafkaLogger.disconnect(); await db.end(); redis.disconnect(); });
 }
 
 start().catch(err => { console.error('fatal:', err); process.exit(1); });

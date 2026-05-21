@@ -1,0 +1,14 @@
+{
+  "name": "pulseapi-kafka-consumer",
+  "version": "1.0.0",
+  "description": "Kafka consumer that batch-inserts request logs into Postgres",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "kafkajs": "^2.2.4",
+    "pg": "^8.11.3",
+    "dotenv": "^16.3.1"
+  }
+}

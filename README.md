@@ -1,6 +1,11 @@
 # ⚡ PulseAPI — Production-Grade API Gateway
 
-A fully functional API gateway built from scratch. Proxies requests, enforces rate limiting via token bucket or sliding window algorithms, handles JWT auth, circuit breaking, retry with exponential backoff, multi-tenancy, distributed tracing, Prometheus metrics, and a live analytics dashboard.
+[![CI](https://github.com/YOUR_USERNAME/pulseapi/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USERNAME/pulseapi/actions)
+[![codecov](https://codecov.io/gh/YOUR_USERNAME/pulseapi/branch/main/graph/badge.svg)](https://codecov.io/gh/YOUR_USERNAME/pulseapi)
+
+**Live demo:** http://YOUR_ORACLE_IP:3000/health — deployed on Oracle Cloud (always-free A1 instance)
+
+A fully functional API gateway built from scratch. Proxies requests, enforces rate limiting via token bucket or sliding window algorithms, handles JWT auth, circuit breaking, retry with exponential backoff, multi-tenancy, distributed tracing, Prometheus metrics, a live analytics dashboard, and **Kafka-based async request logging** for durable, decoupled observability.
 
 ## Quick Start
 
@@ -19,7 +24,10 @@ curl http://localhost:3000/health
 | Grafana | http://localhost:3001 (admin / pulse) |
 | Prometheus | http://localhost:9090 |
 | Jaeger UI | http://localhost:16686 |
+| Kafka broker | localhost:9092 |
 | Admin API | http://localhost:3000/admin (X-Api-Key: admin-secret-key) |
+
+**Production deployment:** see [DEPLOY.md](./DEPLOY.md) for Oracle Cloud (always-free) setup.
 
 ---
 
@@ -39,12 +47,27 @@ Client → PulseAPI Gateway (Node.js/Express)
               ├── upstream-2 (2% fail rate)
               └── upstream-3 (stable)
 
-PostgreSQL ← Request logs (async, 500ms buffer)
+Kafka topic ← Request events (async publish, off critical path)
+  └── kafka-consumer → PostgreSQL (batch INSERT, 500 records or 1s)
+
 WebSocket  → Dashboard (live stats, 1s push)
 Jaeger     ← Distributed traces (OTel)
 Prometheus ← /metrics scraped every 15s
 Grafana    → 13-panel dashboard (auto-provisioned)
 ```
+
+### Kafka async logging pipeline
+
+Request logs are published to a Kafka topic (`request-logs`) instead of writing directly to Postgres. A separate `kafka-consumer` service subscribes and batch-inserts to Postgres.
+
+**Why async via Kafka vs. direct write?**
+- Gateway latency is fully decoupled from Postgres write throughput
+- Kafka retains messages during DB maintenance windows — no logs dropped
+- Fan-out: add analytics consumers, SIEM feeds without touching the gateway
+- Consumer lag is a Kafka-native observable metric
+- Historical replay: reprocess logs against a new schema without rerunning load tests
+
+The gateway falls back to direct Postgres writes automatically when `KAFKA_BROKERS` is not set — local dev works without a Kafka cluster.
 
 ---
 

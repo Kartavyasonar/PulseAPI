@@ -1,5 +1,11 @@
-// Request Logger — writes to PostgreSQL, broadcasts via WebSocket
-// buffered writes (500ms) to keep logger off the critical path
+// Request Logger — publishes to Kafka (if available) or writes directly to
+// PostgreSQL. Broadcasts live events via WebSocket regardless of backend.
+//
+// Kafka path  → entries published to 'request-logs' topic; kafka-consumer/
+//               subscribes and batch-inserts to Postgres. Gateway latency is
+//               fully decoupled from DB write throughput.
+// Postgres path → legacy 500ms-buffered batch INSERT; used when Kafka is
+//               not configured (local dev, test env).
 
 let getCurrentTraceId;
 try {
@@ -8,23 +14,32 @@ try {
   getCurrentTraceId = () => null; // tracing not available in test env
 }
 
+const { kafkaLogger } = require('./kafkaLogger');
+
 class RequestLogger {
   constructor(db, wsServer) {
     this.db = db;
     this.wsServer = wsServer;
+    // buffer used only for the Postgres fallback path
     this.buffer = [];
     setInterval(() => this._flush(), 500);
   }
 
   log(entry) {
-    // attach active trace ID if available
     entry.traceId = entry.traceId || getCurrentTraceId();
-    this.buffer.push(entry);
+    // Always broadcast to WebSocket dashboard — Kafka is the storage path only
     if (this.wsServer) {
       this.wsServer.broadcast({ type: 'request', data: entry });
     }
+    // Try Kafka first; buffer for Postgres if not ready
+    kafkaLogger.publish(entry).then(published => {
+      if (!published) this.buffer.push(entry);
+    }).catch(() => {
+      this.buffer.push(entry);
+    });
   }
 
+  // Postgres fallback flush — only drains when Kafka is unavailable
   async _flush() {
     if (!this.buffer.length) return;
     const entries = this.buffer.splice(0);
@@ -44,7 +59,7 @@ class RequestLogger {
         params
       );
     } catch (err) {
-      console.error('[logger] flush error:', err.message);
+      console.error('[logger] postgres flush error:', err.message);
     }
   }
 }
