@@ -1,9 +1,6 @@
 # ⚡ PulseAPI — Production-Grade API Gateway
 
-A fully functional API gateway built from scratch. Proxies requests, enforces
-rate limiting via token bucket or sliding window algorithms, handles JWT auth,
-circuit breaking, retry with exponential backoff, multi-tenancy, distributed
-tracing, and a live analytics dashboard.
+A fully functional API gateway built from scratch. Proxies requests, enforces rate limiting via token bucket or sliding window algorithms, handles JWT auth, circuit breaking, retry with exponential backoff, multi-tenancy, distributed tracing, Prometheus metrics, and a live analytics dashboard.
 
 ## Quick Start
 
@@ -11,7 +8,6 @@ tracing, and a live analytics dashboard.
 docker compose up -d --build
 # wait ~30s for DB init
 curl http://localhost:3000/health
-./scripts/demo.sh
 ```
 
 **Services after startup:**
@@ -20,9 +16,10 @@ curl http://localhost:3000/health
 |---------|-----|
 | Gateway | http://localhost:3000 |
 | Dashboard | http://localhost:5173 |
-| Admin API | http://localhost:3000/admin (X-Api-Key: admin-secret-key) |
+| Grafana | http://localhost:3001 (admin / pulse) |
+| Prometheus | http://localhost:9090 |
 | Jaeger UI | http://localhost:16686 |
-| WebSocket | ws://localhost:3000/ws |
+| Admin API | http://localhost:3000/admin (X-Api-Key: admin-secret-key) |
 
 ---
 
@@ -45,7 +42,72 @@ Client → PulseAPI Gateway (Node.js/Express)
 PostgreSQL ← Request logs (async, 500ms buffer)
 WebSocket  → Dashboard (live stats, 1s push)
 Jaeger     ← Distributed traces (OTel)
+Prometheus ← /metrics scraped every 15s
+Grafana    → 13-panel dashboard (auto-provisioned)
 ```
+
+---
+
+## Observability
+
+### Prometheus + Grafana
+
+`/metrics` is exposed via `prom-client` and scraped by Prometheus every 15 seconds. The Grafana dashboard provisions automatically on first boot — no manual setup required.
+
+**Metrics exposed:**
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `pulseapi_http_requests_total` | Counter | Request count by method, route, status code |
+| `pulseapi_http_request_duration_ms` | Histogram | Latency distribution (p50/p95/p99 via `histogram_quantile`) |
+| `pulseapi_upstream_errors_total` | Counter | Upstream failures by type (5xx, timeout, circuit_open) |
+| `pulseapi_rate_limit_rejections_total` | Counter | 429s by route and algorithm |
+| `pulseapi_circuit_breaker_state` | Gauge | Per-upstream state: 0=closed, 1=half_open, 2=open |
+| `pulseapi_proxy_retries_total` | Counter | Retry attempts by route and upstream |
+| `pulseapi_ws_connections_active` | Gauge | Active dashboard WebSocket connections |
+| `pulseapi_routes_active` | Gauge | Routes currently loaded in the gateway |
+
+**Key PromQL queries:**
+
+```promql
+# p99 latency
+histogram_quantile(0.99, sum(rate(pulseapi_http_request_duration_ms_bucket[5m])) by (le))
+
+# error rate %
+100 * sum(rate(pulseapi_http_requests_total{status_code=~"5.."}[1m])) / sum(rate(pulseapi_http_requests_total[1m]))
+
+# live request rate by route
+sum(rate(pulseapi_http_requests_total[1m])) by (route_id)
+```
+
+### Distributed Tracing — OpenTelemetry + Jaeger
+
+Every request gets a trace ID propagated through gateway to upstream. Trace ID stored in `requests.trace_id` for cross-signal correlation.
+
+```sql
+SELECT * FROM requests WHERE trace_id = 'abc123...';
+```
+
+View traces at **http://localhost:16686**
+
+---
+
+## Load Testing
+
+```bash
+# install k6
+k6 run load-tests/k6.js
+```
+
+**Measured results at 200 VUs:**
+
+| Metric | Value |
+|--------|-------|
+| Sustained throughput | 207 req/s |
+| p50 latency | 282ms |
+| p95 latency | 407ms |
+| p99 latency | 881ms (via `histogram_quantile` in Prometheus) |
+| Error rate | 0.0% (enterprise tenant, 1000 req/s quota) |
 
 ---
 
@@ -53,18 +115,16 @@ Jaeger     ← Distributed traces (OTel)
 
 ### Rate Limiting — Token Bucket & Sliding Window
 
-Implemented from scratch in `gateway/src/plugins/rateLimit.js` using Redis
-Lua scripts for atomicity (no race conditions under concurrent load).
+Implemented in `gateway/src/plugins/rateLimit.js` using Redis Lua scripts for atomicity — no race conditions under concurrent load.
 
 ```bash
-# trigger rate limiting on /public/ (10 req/s sliding window)
-for i in {1..20}; do curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/public/test; done
+# trigger rate limiting (10 req/s default limit)
+for i in {1..20}; do curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/api/upstream1/test; done
 ```
 
 ### Circuit Breaker — CLOSED / OPEN / HALF_OPEN
 
-State stored in Redis (shared across all gateway instances). Opens after 5
-consecutive 5xx failures, auto-recovers after 30s via HALF_OPEN probe.
+State stored in Redis, shared across all gateway instances. Opens after 5 consecutive 5xx failures, auto-recovers after 30s via HALF_OPEN probe.
 
 ```bash
 # check all circuit states
@@ -90,7 +150,7 @@ curl -X POST http://localhost:3000/admin/routes \
       "auth": {"enabled": false}
     }
   }'
-# route is live immediately — no restart
+# route is live immediately — no restart needed
 ```
 
 ### JWT Auth
@@ -106,51 +166,26 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:3000/secure/data
 
 ## Multi-Tenant Quota Management
 
-Each tenant has an isolated rate limit quota enforced at the Redis layer.
-Tenant API keys are stored as SHA-256 hashes — raw keys never persisted.
+Tenant API keys stored as SHA-256 hashes — raw keys never persisted.
 
-| Tier       | Rate Limit  | Burst |
-|------------|------------|-------|
-| Free       | 10 req/s   | 20    |
-| Pro        | 100 req/s  | 200   |
-| Enterprise | 1000 req/s | 2000  |
+| Tier | Rate Limit | Burst |
+|------|-----------|-------|
+| Free | 10 req/s | 20 |
+| Pro | 100 req/s | 200 |
+| Enterprise | 1000 req/s | 2000 |
 
 ```bash
-# create a tenant
+# create tenant
 curl -X POST http://localhost:3000/admin/tenants \
   -H "X-Api-Key: admin-secret-key" -H "Content-Type: application/json" \
   -d '{"id":"acme","name":"Acme Corp","tier":"pro"}'
 
-# generate API key (raw key returned once, hash stored)
+# generate API key (shown once, hash stored)
 curl -X POST http://localhost:3000/admin/tenants/acme/keys \
   -H "X-Api-Key: admin-secret-key"
 
 # view usage
 curl -H "X-Api-Key: admin-secret-key" http://localhost:3000/admin/tenants/acme/usage
-```
-
----
-
-## Rate Limiting Algorithms
-
-| Algorithm       | Best For               | Tradeoff |
-|----------------|------------------------|---------|
-| Token Bucket   | Burst-tolerant APIs    | Brief bursts above limit allowed |
-| Sliding Window | Strict SLA enforcement | No burst, higher Redis ops |
-
-Configure per-route via `plugins.rateLimit.algorithm: "token-bucket" | "sliding-window"`.
-
----
-
-## Distributed Tracing — OpenTelemetry + Jaeger
-
-Every request gets a trace ID propagated through gateway → upstream.
-View traces at **http://localhost:16686**
-
-Trace ID also stored in `requests.trace_id` — join with analytics:
-
-```sql
-SELECT * FROM requests WHERE trace_id = 'abc123...';
 ```
 
 ---
@@ -174,16 +209,14 @@ WHERE timestamp > NOW() - INTERVAL '1 hour';
 
 ---
 
-## Load Testing
+## Rate Limiting Algorithms
 
-```bash
-pip install locust
-locust -f load-tests/locustfile.py \
-  --host=http://localhost:3000 --users=100 --spawn-rate=10 \
-  --run-time=60s --headless
-```
+| Algorithm | Best For | Tradeoff |
+|-----------|---------|---------|
+| Token Bucket | Burst-tolerant APIs | Brief bursts above limit allowed |
+| Sliding Window | Strict SLA enforcement | No burst, higher Redis ops |
 
-CI failure gates: p99 > 500ms or error rate > 5% exits non-zero.
+Configure per-route via `plugins.rateLimit.algorithm: "token-bucket" | "sliding-window"`.
 
 ---
 
@@ -204,31 +237,10 @@ See `docs/decisions/` for rationale on key engineering choices:
 | Gateway | Node.js + Express | Async I/O, event loop handles concurrency |
 | Rate Limiting | Redis + Lua | Atomic token bucket, shared across instances |
 | Circuit Breaker | Redis | Distributed state, consistent across instances |
+| Metrics | Prometheus + prom-client | Industry standard, histogram_quantile for real p99 |
+| Dashboards | Grafana | 13-panel dashboard, auto-provisioned |
 | Tracing | OpenTelemetry + Jaeger | Industry standard, zero-code instrumentation |
 | Auth | jsonwebtoken | Industry standard JWT |
 | Analytics DB | PostgreSQL | PERCENTILE_CONT for real p99 queries |
 | Dashboard | React + Recharts | Live WebSocket charts |
-| Load Tests | Locust | Scriptable, CI-friendly failure gates |
-| CI/CD | GitHub Actions | test → build → integration |
-
----
-
-## SDE Interview Q&A
-
-**"How does rate limiting work?"** — Token bucket: each client has N tokens,
-refilled at `rate/s`. Implemented in Redis Lua for atomicity. See
-[ADR-001](docs/decisions/001-redis-lua-atomicity.md) for why Lua.
-
-**"Token bucket vs sliding window?"** — Bucket allows bursts, window is strict.
-Both implemented, configurable per route. See [ADR-002](docs/decisions/002-token-bucket-vs-sliding-window.md).
-
-**"What is a circuit breaker?"** — Three-state machine. 5 consecutive 5xx →
-OPEN (instant 503). After 30s → HALF_OPEN probe. Success → CLOSED.
-State in Redis so all instances agree. See [ADR-003](docs/decisions/003-circuit-breaker-shared-redis-state.md).
-
-**"How do you handle multi-tenancy?"** — Per-tenant quota in DB, looked up by
-API key SHA-256 hash. Rate limit key namespaced by tenant ID. Raw keys never stored.
-
-**"How would you scale this to 1M req/s?"** — Horizontal gateway instances
-(stateless — all state in Redis/PG). Redis Cluster for rate limiting at scale.
-PG partitioned by timestamp for analytics. CDN in front for static rate limiting.
+| Load Tests | k6 | Scriptable, CI-friendly |
