@@ -1,10 +1,5 @@
 # ⚡ PulseAPI — Production-Grade API Gateway
 
-[![CI](https://github.com/Kartavyasonar/pulseapi/actions/workflows/ci.yml/badge.svg)](https://github.com/Kartavyasonar/pulseapi/actions)
-[![codecov](https://codecov.io/gh/Kartavyasonar/pulseapi/branch/main/graph/badge.svg)](https://codecov.io/gh/Kartavyasonar/pulseapi)
-
-**Live demo:** http://YOUR_ORACLE_IP:3000/health — deployed on Oracle Cloud (always-free A1 instance)
-
 A fully functional API gateway built from scratch. Proxies requests, enforces rate limiting via token bucket or sliding window algorithms, handles JWT auth, circuit breaking, retry with exponential backoff, multi-tenancy, distributed tracing, Prometheus metrics, a live analytics dashboard, and **Kafka-based async request logging** for durable, decoupled observability.
 
 ## Quick Start
@@ -27,7 +22,6 @@ curl http://localhost:3000/health
 | Kafka broker | localhost:9092 |
 | Admin API | http://localhost:3000/admin (X-Api-Key: admin-secret-key) |
 
-**Production deployment:** see [DEPLOY.md](./DEPLOY.md) for Oracle Cloud (always-free) setup.
 
 ---
 
