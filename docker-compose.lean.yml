@@ -15,7 +15,7 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
-      kafka: {condition: service_healthy}
+      kafka: {condition: service_started}
     restart: unless-stopped
 
   dashboard:
@@ -32,7 +32,7 @@ services:
       - KAFKA_TOPIC=request-logs
     depends_on:
       postgres: {condition: service_healthy}
-      kafka: {condition: service_healthy}
+      kafka: {condition: service_started}
     restart: unless-stopped
 
   kafka:
@@ -52,12 +52,6 @@ services:
       KAFKA_HEAP_OPTS: "-Xmx256m -Xms128m"
     volumes:
       - kafka_data:/var/lib/kafka/data
-    healthcheck:
-      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
-      interval: 15s
-      timeout: 5s
-      retries: 20
-      start_period: 60s
     restart: unless-stopped
 
   redis:

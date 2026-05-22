@@ -182,7 +182,7 @@ function adminRouter(db, routeManager, circuitBreaker, wsServer) {
         wait
       done
     `;
-    loadProc = spawn('bash', ['-c', script]);
+    loadProc = spawn('sh', ['-c', script]);
 
     loadProc.stdout.on('data', (data) => {
       const lines = data.toString().trim().split('\n');
