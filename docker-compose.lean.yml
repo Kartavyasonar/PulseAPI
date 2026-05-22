@@ -1,0 +1,103 @@
+services:
+  gateway:
+    build: ./gateway
+    ports: ["3000:3000"]
+    environment:
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://pulse:pulse@postgres:5432/pulseapi
+      - JWT_SECRET=${JWT_SECRET:-supersecretjwtkey123}
+      - ADMIN_KEY=${ADMIN_KEY:-admin-secret-key}
+      - JAEGER_ENDPOINT=
+      - OTEL_SDK_DISABLED=true
+      - KAFKA_BROKERS=kafka:9092
+      - KAFKA_TOPIC=request-logs
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+    restart: unless-stopped
+
+  dashboard:
+    build: ./dashboard
+    ports: ["5173:80"]
+    depends_on: [gateway]
+    restart: unless-stopped
+
+  kafka-consumer:
+    build: ./kafka-consumer
+    environment:
+      - DATABASE_URL=postgresql://pulse:pulse@postgres:5432/pulseapi
+      - KAFKA_BROKERS=kafka:9092
+      - KAFKA_TOPIC=request-logs
+    depends_on:
+      postgres: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+    restart: unless-stopped
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      CLUSTER_ID: "pyzPl9MKQ5muxDZLNgYAHQ"
+      KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_HEAP_OPTS: "-Xmx256m -Xms128m"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --maxmemory 64mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=pulse
+      - POSTGRES_PASSWORD=pulse
+      - POSTGRES_DB=pulseapi
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulse -d pulseapi"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  upstream1:
+    build: ./upstream-mock
+    environment: [PORT=4001, SERVICE_NAME=upstream-1, FAIL_RATE=0.05]
+
+  upstream2:
+    build: ./upstream-mock
+    environment: [PORT=4002, SERVICE_NAME=upstream-2, FAIL_RATE=0.02]
+
+  upstream3:
+    build: ./upstream-mock
+    environment: [PORT=4003, SERVICE_NAME=upstream-3, FAIL_RATE=0.0]
+
+volumes:
+  pg_data:
+  kafka_data:
