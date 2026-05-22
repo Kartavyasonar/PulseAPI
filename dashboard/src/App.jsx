@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   AreaChart, Area, LineChart, Line, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
@@ -81,13 +81,16 @@ function AddRouteModal({ onAdd, onClose }) {
     setResult(res);
   }
 
+  // FIX: returns style object only (no event handler), so checkbox width override works correctly
+  const inpStyle = {
+    width: '100%', background: '#0a0a0f', border: '1px solid #2a2a3a', borderRadius: 8,
+    color: '#e8e8f0', padding: '10px 12px', fontFamily: 'JetBrains Mono', fontSize: 13, outline: 'none',
+  };
+
   const inp = (field) => ({
     value: form[field],
     onChange: (e) => setForm({ ...form, [field]: e.target.type === 'checkbox' ? e.target.checked : e.target.value }),
-    style: {
-      width: '100%', background: '#0a0a0f', border: '1px solid #2a2a3a', borderRadius: 8,
-      color: '#e8e8f0', padding: '10px 12px', fontFamily: 'JetBrains Mono', fontSize: 13, outline: 'none',
-    },
+    style: inpStyle,
   });
 
   return (
@@ -114,8 +117,9 @@ function AddRouteModal({ onAdd, onClose }) {
                 <input {...inp(field)} />
               </div>
             ))}
+            {/* FIX: style prop placed after spread so width: 'auto' correctly overrides width: '100%' */}
             <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', fontSize: 13 }}>
-              <input type="checkbox" {...inp('authRequired')} style={{ width: 'auto' }} />
+              <input type="checkbox" {...inp('authRequired')} style={{ ...inpStyle, width: 'auto' }} />
               <span style={{ fontFamily: 'JetBrains Mono', color: '#e8e8f0' }}>Require JWT auth</span>
             </label>
             <button onClick={submit} style={{ padding: '12px', background: '#6366f1', border: 'none', borderRadius: 8, color: '#fff', fontFamily: 'JetBrains Mono', fontWeight: 700, cursor: 'pointer', fontSize: 14 }}>
@@ -171,6 +175,14 @@ export default function App() {
   const [tokenInfo, setTokenInfo] = useState(null);
   const [rpsHistory, setRpsHistory] = useState([]);
 
+  // Load generator state
+  const [loadCfg, setLoadCfg] = useState({ vus: 10, duration: 30, path: '/api/test' });
+  const [loadStats, setLoadStats] = useState({ running: false, sent: 0, errors: 0 });
+  const [loadHistory, setLoadHistory] = useState([]);
+
+  const ADMIN_KEY = import.meta.env.VITE_ADMIN_KEY || 'admin-secret-key';
+  const GATEWAY_URL = import.meta.env.VITE_GATEWAY_URL || 'http://localhost:3000';
+
   // Track RPS history
   useEffect(() => {
     if (lastStats) {
@@ -180,6 +192,50 @@ export default function App() {
       });
     }
   }, [lastStats]);
+
+  // FIX: removed dead useEffect that had an unconditional early return and never did anything
+
+  // Poll load status when running
+  useEffect(() => {
+    if (!loadStats.running) return;
+    const t = setInterval(async () => {
+      try {
+        const r = await fetch(`${GATEWAY_URL}/admin/loadtest/status`, { headers: { 'X-Api-Key': ADMIN_KEY } });
+        const d = await r.json();
+        setLoadStats(d);
+        if (d.sent > 0) {
+          setLoadHistory(prev => [...prev.slice(-60), {
+            time: new Date().toLocaleTimeString(),
+            sent: d.sent,
+            errors: d.errors,
+            rps: Math.round(d.sent / Math.max(1, (Date.now() - d.startedAt) / 1000)),
+          }]);
+        }
+        if (!d.running) clearInterval(t);
+      } catch {}
+    }, 1000);
+    return () => clearInterval(t);
+  }, [loadStats.running]);
+
+  async function startLoad() {
+    try {
+      const r = await fetch(`${GATEWAY_URL}/admin/loadtest/start`, {
+        method: 'POST',
+        headers: { 'X-Api-Key': ADMIN_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify(loadCfg),
+      });
+      const d = await r.json();
+      if (r.ok) { setLoadStats({ running: true, sent: 0, errors: 0, startedAt: Date.now() }); setLoadHistory([]); }
+      else alert(d.error);
+    } catch (e) { alert(e.message); }
+  }
+
+  async function stopLoad() {
+    try {
+      await fetch(`${GATEWAY_URL}/admin/loadtest/stop`, { method: 'POST', headers: { 'X-Api-Key': ADMIN_KEY } });
+      setLoadStats(s => ({ ...s, running: false }));
+    } catch {}
+  }
 
   const timeseries = analytics?.latencyTimeseries?.slice(0, 30).reverse().map((r) => ({
     time: (() => { const d = r.bucket instanceof Date ? r.bucket : new Date(r.bucket); return isNaN(d) ? '—' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); })(),
@@ -232,11 +288,12 @@ export default function App() {
 
       {/* Tabs */}
       <div style={{ padding: '16px 32px', borderBottom: '1px solid #2a2a3a', display: 'flex', gap: 4 }}>
-        {['overview', 'latency', 'routes', 'logs'].map((t) => (
+        {['overview', 'latency', 'routes', 'logs', 'loadtest'].map((t) => (
           <button key={t} style={tabStyle(t)} onClick={() => setTab(t)}>{t.charAt(0).toUpperCase() + t.slice(1)}</button>
         ))}
       </div>
 
+      {/* FIX: added missing closing </div> for this wrapper at the bottom */}
       <div style={{ padding: 32 }}>
         {/* OVERVIEW TAB */}
         {tab === 'overview' && (
@@ -262,7 +319,8 @@ export default function App() {
                       <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
                     </linearGradient>
                   </defs>
-                  <CartesianGrid strokeDasharray="3 3" />
+                  {/* FIX: added consistent stroke color to CartesianGrid */}
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1a1a24" />
                   <XAxis dataKey="time" tick={{ fontSize: 10 }} />
                   <YAxis tick={{ fontSize: 10 }} />
                   <Tooltip content={<CustomTooltip />} />
@@ -277,7 +335,7 @@ export default function App() {
                 <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 20, fontFamily: 'JetBrains Mono' }}>Status Code Distribution</h3>
                 <ResponsiveContainer width="100%" height={180}>
                   <BarChart data={analytics?.errorBreakdown || []}>
-                    <CartesianGrid strokeDasharray="3 3" />
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1a1a24" />
                     <XAxis dataKey="status_code" tick={{ fontSize: 11 }} />
                     <YAxis tick={{ fontSize: 11 }} />
                     <Tooltip content={<CustomTooltip />} />
@@ -301,7 +359,6 @@ export default function App() {
                 </div>
               </div>
             </div>
-
             <RequestFeed requests={recentRequests} />
           </div>
         )}
@@ -313,7 +370,7 @@ export default function App() {
               <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 20, fontFamily: 'JetBrains Mono' }}>Latency Percentiles — Last 1 Hour</h3>
               <ResponsiveContainer width="100%" height={350}>
                 <LineChart data={timeseries}>
-                  <CartesianGrid strokeDasharray="3 3" />
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1a1a24" />
                   <XAxis dataKey="time" tick={{ fontSize: 10 }} />
                   <YAxis unit="ms" tick={{ fontSize: 10 }} />
                   <Tooltip content={<CustomTooltip />} />
@@ -334,7 +391,7 @@ export default function App() {
                       <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
                     </linearGradient>
                   </defs>
-                  <CartesianGrid strokeDasharray="3 3" />
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1a1a24" />
                   <XAxis dataKey="time" tick={{ fontSize: 10 }} />
                   <YAxis tick={{ fontSize: 10 }} />
                   <Tooltip content={<CustomTooltip />} />
@@ -355,7 +412,6 @@ export default function App() {
                 padding: '10px 20px', fontFamily: 'JetBrains Mono', fontWeight: 600, cursor: 'pointer',
               }}>+ Add Route (Hot Reload)</button>
             </div>
-
             {routes.map((route) => (
               <div key={route.id} style={{ background: '#111118', border: '1px solid #2a2a3a', borderRadius: 12, padding: 24 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
@@ -368,7 +424,6 @@ export default function App() {
                     padding: '4px 12px', fontFamily: 'JetBrains Mono', fontSize: 12, cursor: 'pointer',
                   }}>Delete</button>
                 </div>
-
                 {/* Upstreams + Circuit Breakers */}
                 <div style={{ marginBottom: 12 }}>
                   <div style={{ fontSize: 11, color: '#6b6b80', fontFamily: 'JetBrains Mono', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 1 }}>Upstreams</div>
@@ -390,7 +445,6 @@ export default function App() {
                     })}
                   </div>
                 </div>
-
                 {/* Plugins */}
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   {Object.entries(route.plugins).map(([name, cfg]) => (
@@ -422,7 +476,6 @@ export default function App() {
                 padding: '8px 16px', fontFamily: 'JetBrains Mono', fontSize: 12, cursor: 'pointer',
               }}>Generate Test JWT</button>
             </div>
-
             {tokenInfo && (
               <div style={{ background: '#111118', border: '1px solid #22d3ee44', borderRadius: 12, padding: 20 }}>
                 <div style={{ fontSize: 11, color: '#22d3ee', fontFamily: 'JetBrains Mono', marginBottom: 8 }}>TEST JWT TOKEN</div>
@@ -430,7 +483,6 @@ export default function App() {
                 <div style={{ marginTop: 8, fontSize: 11, color: '#6b6b80', fontFamily: 'JetBrains Mono' }}>{tokenInfo.usage}</div>
               </div>
             )}
-
             <div style={{ background: '#111118', border: '1px solid #2a2a3a', borderRadius: 12, overflow: 'hidden' }}>
               <div style={{ padding: '12px 20px', borderBottom: '1px solid #2a2a3a', display: 'grid', gridTemplateColumns: '60px 60px 1fr 100px 70px 70px', gap: 12, fontSize: 10, fontFamily: 'JetBrains Mono', color: '#6b6b80', textTransform: 'uppercase' }}>
                 <span>Method</span><span>Status</span><span>Path</span><span>Route</span><span>Latency</span><span>Retries</span>
@@ -460,10 +512,138 @@ export default function App() {
             </div>
           </div>
         )}
-      </div>
 
-      {showAddRoute && <AddRouteModal onAdd={addRoute} onClose={() => setShowAddRoute(false)} />}
+        {/* LOAD GENERATOR TAB */}
+        {tab === 'loadtest' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 24, maxWidth: 900 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <h2 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>⚡ Load Generator</h2>
+              {loadStats.running && (
+                <span style={{ background: '#ef444422', border: '1px solid #ef444444', borderRadius: 6, padding: '3px 10px', fontSize: 11, fontFamily: 'JetBrains Mono', color: '#ef4444', fontWeight: 700 }}>
+                  ● RUNNING
+                </span>
+              )}
+            </div>
+            {/* Config Panel */}
+            <div style={{ background: '#111118', border: '1px solid #2a2a3a', borderRadius: 12, padding: 24, display: 'flex', flexDirection: 'column', gap: 20 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2fr', gap: 16 }}>
+                {/* VUs */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <label style={{ fontSize: 11, color: '#6b6b80', fontFamily: 'JetBrains Mono', textTransform: 'uppercase', letterSpacing: 1 }}>
+                    Virtual Users: <span style={{ color: '#6366f1', fontWeight: 700 }}>{loadCfg.vus}</span>
+                  </label>
+                  <input type="range" min={1} max={50} value={loadCfg.vus}
+                    onChange={e => setLoadCfg(c => ({ ...c, vus: +e.target.value }))}
+                    disabled={loadStats.running}
+                    style={{ accentColor: '#6366f1', width: '100%' }}
+                  />
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#6b6b80', fontFamily: 'JetBrains Mono' }}>
+                    <span>1</span><span>50</span>
+                  </div>
+                </div>
+                {/* Duration */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <label style={{ fontSize: 11, color: '#6b6b80', fontFamily: 'JetBrains Mono', textTransform: 'uppercase', letterSpacing: 1 }}>
+                    Duration: <span style={{ color: '#6366f1', fontWeight: 700 }}>{loadCfg.duration}s</span>
+                  </label>
+                  <input type="range" min={5} max={120} step={5} value={loadCfg.duration}
+                    onChange={e => setLoadCfg(c => ({ ...c, duration: +e.target.value }))}
+                    disabled={loadStats.running}
+                    style={{ accentColor: '#6366f1', width: '100%' }}
+                  />
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#6b6b80', fontFamily: 'JetBrains Mono' }}>
+                    <span>5s</span><span>120s</span>
+                  </div>
+                </div>
+                {/* Path */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <label style={{ fontSize: 11, color: '#6b6b80', fontFamily: 'JetBrains Mono', textTransform: 'uppercase', letterSpacing: 1 }}>Target Path</label>
+                  <input value={loadCfg.path}
+                    onChange={e => setLoadCfg(c => ({ ...c, path: e.target.value }))}
+                    disabled={loadStats.running}
+                    style={{
+                      background: '#0a0a0f', border: '1px solid #2a2a3a', borderRadius: 8,
+                      color: '#e8e8f0', padding: '8px 12px', fontFamily: 'JetBrains Mono', fontSize: 13,
+                    }}
+                  />
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {['/api/test', '/api/smoke-test', '/health'].map(p => (
+                      <button key={p} onClick={() => setLoadCfg(c => ({ ...c, path: p }))}
+                        disabled={loadStats.running}
+                        style={{ background: loadCfg.path === p ? '#6366f122' : 'transparent', border: `1px solid ${loadCfg.path === p ? '#6366f1' : '#2a2a3a'}`, borderRadius: 4, color: loadCfg.path === p ? '#6366f1' : '#6b6b80', padding: '2px 8px', fontSize: 10, fontFamily: 'JetBrains Mono', cursor: 'pointer' }}
+                      >{p}</button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              {/* Start/Stop */}
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                {!loadStats.running ? (
+                  <button onClick={startLoad} style={{
+                    background: '#10b981', border: 'none', borderRadius: 8, color: '#fff',
+                    padding: '12px 32px', fontFamily: 'JetBrains Mono', fontWeight: 700, fontSize: 14, cursor: 'pointer',
+                  }}>▶ Start Load Test</button>
+                ) : (
+                  <button onClick={stopLoad} style={{
+                    background: '#ef4444', border: 'none', borderRadius: 8, color: '#fff',
+                    padding: '12px 32px', fontFamily: 'JetBrains Mono', fontWeight: 700, fontSize: 14, cursor: 'pointer',
+                  }}>⏹ Stop</button>
+                )}
+                <span style={{ fontSize: 12, color: '#6b6b80', fontFamily: 'JetBrains Mono' }}>
+                  Max 50 VUs · 120s · load runs server-side on the GCP VM
+                </span>
+              </div>
+            </div>
+
+            {/* Live Stats */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16 }}>
+              {[
+                { label: 'Requests Sent', value: loadStats.sent ?? 0, color: '#6366f1' },
+                { label: 'Errors', value: loadStats.errors ?? 0, color: '#ef4444' },
+                // FIX: use loadStats.sent > 0 instead of truthy check so 0 doesn't produce NaN display
+                { label: 'Success Rate', value: loadStats.sent > 0 ? `${(((loadStats.sent - loadStats.errors) / loadStats.sent) * 100).toFixed(1)}%` : '—', color: '#10b981' },
+                { label: 'Avg RPS', value: loadStats.sent > 0 && loadStats.startedAt ? Math.round(loadStats.sent / Math.max(1, (Date.now() - loadStats.startedAt) / 1000)) : '—', color: '#f59e0b' },
+              ].map(({ label, value, color }) => (
+                <div key={label} style={{ background: '#111118', border: '1px solid #2a2a3a', borderRadius: 12, padding: '16px 20px' }}>
+                  <div style={{ fontSize: 11, color: '#6b6b80', fontFamily: 'JetBrains Mono', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>{label}</div>
+                  <div style={{ fontSize: 28, fontWeight: 700, fontFamily: 'JetBrains Mono', color }}>{value}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Live Chart */}
+            {loadHistory.length > 0 && (
+              <div style={{ background: '#111118', border: '1px solid #2a2a3a', borderRadius: 12, padding: 24 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 16, fontFamily: 'JetBrains Mono', color: '#6b6b80', textTransform: 'uppercase', letterSpacing: 1 }}>Live Throughput</div>
+                <ResponsiveContainer width="100%" height={200}>
+                  <AreaChart data={loadHistory}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1a1a24" />
+                    <XAxis dataKey="time" tick={{ fill: '#6b6b80', fontSize: 10, fontFamily: 'JetBrains Mono' }} />
+                    <YAxis tick={{ fill: '#6b6b80', fontSize: 10, fontFamily: 'JetBrains Mono' }} />
+                    <Tooltip content={<CustomTooltip />} />
+                    <Area type="monotone" dataKey="rps" stroke="#6366f1" fill="#6366f122" name="RPS" strokeWidth={2} />
+                    <Area type="monotone" dataKey="errors" stroke="#ef4444" fill="#ef444422" name="errors" strokeWidth={2} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
+            {!loadStats.running && loadStats.sent === 0 && (
+              <div style={{ background: '#111118', border: '1px solid #2a2a3a', borderRadius: 12, padding: 32, textAlign: 'center', color: '#6b6b80', fontFamily: 'JetBrains Mono', fontSize: 13 }}>
+                Configure VUs and duration above, then click Start to generate live load.<br />
+                Watch the Overview tab update in real time as requests flow through.
+              </div>
+            )}
+          </div>
+        )}
+      </div>{/* FIX: this closing tag was missing, causing a JSX structure error */}
+
+      {showAddRoute && (
+        <AddRouteModal
+          onAdd={async (route) => { const r = await addRoute(route); setShowAddRoute(false); return r; }}
+          onClose={() => setShowAddRoute(false)}
+        />
+      )}
     </div>
   );
 }
-  

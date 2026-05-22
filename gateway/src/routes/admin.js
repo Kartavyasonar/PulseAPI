@@ -153,6 +153,67 @@ function adminRouter(db, routeManager, circuitBreaker, wsServer) {
     res.status(201).json({ key: rawKey, hint: 'Store this — it will not be shown again' });
   });
 
+  // ── Load Generator ────────────────────────────────────────────────────────
+  // Spawns HTTP load against the gateway itself from inside the VM.
+  // POST /admin/loadtest/start  { vus, duration, path }
+  // POST /admin/loadtest/stop
+  // GET  /admin/loadtest/status
+
+  const { spawn } = require('child_process');
+  let loadProc = null;
+  let loadStats = { running: false, sent: 0, errors: 0, startedAt: null };
+
+  router.post('/loadtest/start', (req, res) => {
+    if (loadProc) return res.status(409).json({ error: 'load test already running — POST /admin/loadtest/stop first' });
+    const vus      = Math.min(parseInt(req.body.vus      || 10),  50);
+    const duration = Math.min(parseInt(req.body.duration || 30), 120);
+    const path     = (req.body.path || '/api/test').replace(/[^a-zA-Z0-9/_-]/g, '');
+    const url      = `http://localhost:3000${path}`;
+
+    loadStats = { running: true, sent: 0, errors: 0, startedAt: Date.now(), vus, duration, path };
+
+    // Use bash to run parallel curl workers for `duration` seconds
+    const script = `
+      end=$((SECONDS+${duration}))
+      while [ $SECONDS -lt $end ]; do
+        for i in $(seq 1 ${vus}); do
+          curl -s -o /dev/null -w "%{http_code}\\n" ${url} &
+        done
+        wait
+      done
+    `;
+    loadProc = spawn('bash', ['-c', script]);
+
+    loadProc.stdout.on('data', (data) => {
+      const lines = data.toString().trim().split('\n');
+      lines.forEach(code => {
+        loadStats.sent++;
+        if (parseInt(code) >= 400 || !code.match(/^\d+$/)) loadStats.errors++;
+      });
+      wsServer.broadcast({ type: 'loadtest', data: { ...loadStats } });
+    });
+
+    loadProc.on('close', () => {
+      loadStats.running = false;
+      loadProc = null;
+      wsServer.broadcast({ type: 'loadtest', data: { ...loadStats } });
+    });
+
+    res.json({ message: `load test started`, vus, duration, path });
+  });
+
+  router.post('/loadtest/stop', (req, res) => {
+    if (!loadProc) return res.json({ message: 'no load test running' });
+    loadProc.kill('SIGTERM');
+    loadProc = null;
+    loadStats.running = false;
+    res.json({ message: 'stopped', stats: loadStats });
+  });
+
+  router.get('/loadtest/status', (req, res) => {
+    res.json(loadStats);
+  });
+
   // ── Auth ──────────────────────────────────────────────────────────────────
 
   router.post('/token', (req, res) => {
