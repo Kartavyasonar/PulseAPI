@@ -1,5 +1,11 @@
 # ⚡ PulseAPI — Production-Grade API Gateway
 
+[![CI](https://github.com/Kartavyasonar/PulseAPI/actions/workflows/ci.yml/badge.svg)](https://github.com/Kartavyasonar/PulseAPI/actions/workflows/ci.yml)
+
+> **Live Demo:** [http://34.82.82.190:5173](http://34.82.82.190:5173)  
+> **Gateway API:** [http://34.82.82.190:3000/health](http://34.82.82.190:3000/health)
+
+
 A fully functional API gateway built from scratch. Proxies requests, enforces rate limiting via token bucket or sliding window algorithms, handles JWT auth, circuit breaking, retry with exponential backoff, multi-tenancy, distributed tracing, Prometheus metrics, a live analytics dashboard, and **Kafka-based async request logging** for durable, decoupled observability.
 
 ## Quick Start
